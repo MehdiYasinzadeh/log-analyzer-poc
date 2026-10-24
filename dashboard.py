@@ -22,9 +22,10 @@ html, body, [data-testid="stAppViewContainer"], .stApp {
     font-family: 'Vazirmatn', sans-serif !important;
 }
 
-[data-testid="stSidebar"] {
-    direction: rtl !important;
-    text-align: right !important;
+.stRadio > div {
+    flex-direction: row-reverse !important;
+    justify-content: center !important;
+    gap: 20px !important;
 }
 
 .metric-box {
@@ -70,19 +71,38 @@ def get_db():
 
 try:
     db = get_db()
-    windows_col = db["window_predictions"]
-    records = list(windows_col.find({}, {"_id": 0, "true_label": 1, "predicted_label": 1}))
 except Exception as e:
     st.error(f"خطا در ارتباط با دیتابیس مونگو: {e}")
     st.stop()
 
 # تیتر صفحه
 st.markdown("<h2 style='text-align: center;'>🎯 نتیجه ارزیابی پیش‌بینی مدل</h2>", unsafe_allow_html=True)
-st.markdown("<p style='text-align: center; color: #94A3B8;'>مقایسه ساده نسبت درستی و نادرستی پیش‌بینی‌های مدل Laya در برابر لیبل واقعی</p>", unsafe_allow_html=True)
-st.markdown("<br>", unsafe_allow_html=True)
+st.markdown("<p style='text-align: center; color: #94A3B8;'>مقایسه نسبت درستی و نادرستی پیش‌بینی‌های مدل Laya در برابر لیبل واقعی</p>", unsafe_allow_html=True)
+
+# انتخاب سطح ارزیابی
+view_level = st.radio(
+    "نمایش نتایج بر اساس:",
+    ["تک‌تک سطرهای لاگ (Line-by-Line)", "پنجره‌های لاگ با هم‌پوشانی (Windows)"],
+    horizontal=True
+)
+
+if "سطر" in view_level:
+    raw_records = list(db["line_predictions"].find(
+        {"latest_predicted_label": {"$exists": True}},
+        {"_id": 0, "true_label": 1, "latest_predicted_label": 1}
+    ))
+    records = [
+        {"true_label": r["true_label"], "predicted_label": r["latest_predicted_label"]}
+        for r in raw_records
+    ]
+else:
+    records = list(db["window_predictions"].find(
+        {},
+        {"_id": 0, "true_label": 1, "predicted_label": 1}
+    ))
 
 if not records:
-    st.info("داده‌ای در دیتابیس یافت نشد. لطفاً main.py را اجرا کنید.")
+    st.info("داده‌ای در دیتابیس یافت نشد. لطفاً پایپ‌لاین main.py را اجرا کنید.")
     time.sleep(3)
     st.rerun()
 
@@ -93,6 +113,8 @@ wrong = total - correct
 
 pct_correct = (correct / total * 100) if total > 0 else 0
 pct_wrong = (wrong / total * 100) if total > 0 else 0
+
+st.markdown("<br>", unsafe_allow_html=True)
 
 # ۱. نمایش درصد درست و غلط
 col1, col2 = st.columns(2)
@@ -147,7 +169,7 @@ fig.update_layout(
     plot_bgcolor="rgba(0,0,0,0)"
 )
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width="stretch")
 
 # رفرش لحظه‌ای
 time.sleep(3)

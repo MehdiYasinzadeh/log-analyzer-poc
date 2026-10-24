@@ -52,28 +52,29 @@ class MongoDBManager:
         )
         return doc["window_id"]
 
-    def save_line_results(self, window: Dict[str, Any], prediction: Dict[str, Any]):
+    def save_batch_line_results(self, logs: List[Dict[str, Any]], line_predictions: Dict[int, Dict[str, Any]]):
         """
-        Records predicted window label against each constituent line.
+        Saves individual line predictions from Laya.
         """
-        for item in window["logs"]:
+        for item in logs:
+            lno = item["line_no"]
+            l_pred = line_predictions.get(lno, {})
             line_doc = {
-                "line_no": item["line_no"],
+                "line_no": lno,
                 "raw_text": item["log_text"],
                 "original_alert_tag": item["alert_tag"],
                 "true_label": item["ground_truth"],
-                "latest_predicted_label": prediction["predicted_label"],
-                "window_id": window["window_id"],
+                "latest_predicted_label": l_pred.get("predicted_label", "Normal"),
+                "confidence": l_pred.get("confidence", 0.0),
+                "probabilities": l_pred.get("probabilities", {}),
+                "is_correct": item["ground_truth"] == l_pred.get("predicted_label", "Normal"),
                 "updated_at": datetime.utcnow()
             }
             self.lines_col.update_one(
-                {"line_no": item["line_no"]},
+                {"line_no": lno},
                 {"$set": line_doc},
                 upsert=True
             )
 
     def fetch_evaluation_records(self) -> List[Dict[str, Any]]:
-        """
-        Fetches all window prediction records for metric calculations.
-        """
         return list(self.windows_col.find({}, {"_id": 0}))
