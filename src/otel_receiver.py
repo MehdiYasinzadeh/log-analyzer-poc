@@ -18,7 +18,7 @@ from src.spring_analyzer import SpringIncidentClassifier
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = "bgl_aiops"
 COLLECTION_NAME = "otel_live_incidents"
-GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
+GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:8080")
 
 # Windowing parameters
 WINDOW_SIZE = 25
@@ -75,8 +75,7 @@ def send_grafana_annotation(incident: Dict[str, Any]):
     Sends an incident event as a native annotation to Grafana API.
     """
     annotation_urls = [
-        "http://localhost:8080/api/annotations",
-        "http://localhost:3000/api/annotations"
+        "http://localhost:8080/api/annotations"
     ]
     
     text = (
