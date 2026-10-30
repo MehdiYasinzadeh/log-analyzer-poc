@@ -18,7 +18,7 @@ from src.spring_analyzer import SpringIncidentClassifier
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 DB_NAME = "bgl_aiops"
 COLLECTION_NAME = "otel_live_incidents"
-GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:8080/grafana")
+GRAFANA_URL = os.getenv("GRAFANA_URL", "http://localhost:3000")
 
 # Windowing parameters
 WINDOW_SIZE = 25
