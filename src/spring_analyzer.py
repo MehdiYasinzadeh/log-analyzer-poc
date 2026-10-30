@@ -64,6 +64,7 @@ class SpringIncidentClassifier:
     CATEGORY_LABELS = {
         "NORMAL": "عادی (روند روتین سرویس)",
         "INFRASTRUCTURE_OUTAGE": "بحران زیرساخت و دیتابیس (Infrastructure Outage)",
+        "TRANSACTION_FAILURE": "شکست و رول‌بک ترانزکشن (Transaction Rollback)",
         "BUSINESS_RULE_REJECTION": "عدم تأیید قوانین بیمه (Business Rule Rejection)",
         "SOFTWARE_DEFECT": "خطای برنامه‌نویسی و باگ نرم‌افزاری (Software Defect)",
         "SYSTEM_WARNING": "هشدار سیستمی (System Warning)"
@@ -160,3 +161,119 @@ class SpringIncidentClassifier:
             "root_cause": root_cause,
             "recommended_action": recommendation
         }
+
+    @classmethod
+    def analyze_window(cls, window: Dict[str, Any], laya_prediction: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Analyzes a sliding window based on Laya's gatekeeper prediction.
+        """
+        is_error = laya_prediction.get("predicted_label") == "Error"
+        confidence = laya_prediction.get("confidence", 0.90)
+
+        # 1. Normal window according to Laya
+        if not is_error:
+            return {
+                "window_id": window["window_id"],
+                "start_line": window["start_line"],
+                "end_line": window["end_line"],
+                "is_anomaly": False,
+                "confidence": confidence,
+                "category": "NORMAL",
+                "category_fa": cls.CATEGORY_LABELS["NORMAL"],
+                "severity": "NORMAL",
+                "exception_type": None,
+                "root_cause": "روند عادی سرور بدون خطا",
+                "recommended_action": "وضعیت پایدار؛ نیازی به اقدام ندارد.",
+                "timestamp": "N/A",
+                "thread": "N/A",
+                "snippet": window["lines"][0] if window.get("lines") else ""
+            }
+
+        # 2. Window is flagged as ANOMALY / ERROR by Laya: Extract Root Cause
+        text = window.get("combined_text", "")
+        lines = window.get("lines", text.split("\n"))
+
+        # Find timestamp
+        ts_match = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', text)
+        timestamp = ts_match.group(1) if ts_match else "نامشخص"
+
+        # Find thread
+        thread_match = re.search(r'\[([^\]]+)\]', text)
+        thread = thread_match.group(1) if thread_match else "main"
+
+        # Extract thrown exceptions
+        exc_pattern = re.compile(r'(?:Caused by:\s*|^|\n\s*)([a-zA-Z0-9_.]+(?:Exception|Error))(?::\s*([^\n\r\t]+))?')
+        matches = exc_pattern.findall(text)
+        valid_causes = [m for m in matches if not m[0].endswith(('Runnable', 'Logger', 'Handler', 'Helper', 'Template', 'Factory'))]
+
+        if valid_causes:
+            root_exc = valid_causes[-1][0]
+            root_msg = valid_causes[-1][1].strip() if valid_causes[-1][1] else ""
+            if not root_msg and len(valid_causes) > 1:
+                for c in reversed(valid_causes):
+                    if c[1].strip():
+                        root_msg = c[1].strip()
+                        break
+        else:
+            # Fallback check for JDBC / Rollback in raw text
+            if "JDBC Connection" in text:
+                root_exc = "GenericJDBCException"
+                root_msg = "Unable to acquire JDBC Connection"
+            elif "rollback" in text.lower():
+                root_exc = "RollbackException"
+                root_msg = "Transaction rollback detected"
+            else:
+                root_exc = "ApplicationError"
+                root_msg = lines[0] if lines else "Error detected in window"
+
+        exc_short = root_exc.split(".")[-1]
+
+        # Categorize
+        if re.search(r'(JDBC|Connection|SQLException|MongoSocket|MongoTimeout|DataAccessResourceFailure|CannotAcquireLock|TimeoutException|ResourceException|PersistenceException|JpaSystemException)', root_exc):
+            category = "INFRASTRUCTURE_OUTAGE"
+            severity = "CRITICAL"
+            root_cause = f"بحران دیتابیس و ارتباط شبکه ({exc_short}): {root_msg or 'عدم امکان دریافت کانکشن یا قطعی ارتباط با پایگاه داده'}"
+            recommendation = "بررسی سلامت سرویس دیتابیس، ترافیک شبکه‌ای و بازبینی اندازه Connection Pool (HikariCP/DataSource)."
+
+        elif re.search(r'(RollbackException|TransactionSystemException|UnexpectedRollbackException|HeuristicHazard)', root_exc) or "rollback" in text.lower():
+            category = "TRANSACTION_FAILURE"
+            severity = "HIGH"
+            root_cause = f"خطای شکست و رول‌بک ترانزکشن ({exc_short}): {root_msg or 'ترانزکشن مالی یا جاب پردازشی رول‌بک شد'}"
+            recommendation = "بررسی منطق تراکنش‌های متوالی، زمان timeout تراکنش و اطمینان از commit صحیح داده‌ها."
+
+        elif re.search(r'(RuleException|ValidationException|ConstraintViolation|MethodArgumentNotValid)', root_exc):
+            category = "BUSINESS_RULE_REJECTION"
+            severity = "MEDIUM"
+            root_cause = f"عدم انطباق با قوانین بیمه ({exc_short}): {root_msg or 'رد درخواست بر اساس قوانین سیستم'}"
+            recommendation = "بررسی اطلاعات بیمه‌نامه یا مدارک ورودی و اصلاح داده‌ها توسط کارشناس."
+
+        elif re.search(r'(NullPointerException|IndexOutOfBounds|ClassCast|IllegalState|IllegalArgument)', root_exc):
+            category = "SOFTWARE_DEFECT"
+            severity = "HIGH"
+            root_cause = f"باگ نرم‌افزاری در کد جاوا ({exc_short}): مقداردهی تهی (Null) یا دسترسی نامعتبر"
+            recommendation = "ارجاع به تیم توسعه جهت اصلاح شرط‌های بررسی مقدار تهی (Null-Check) و دیباگ متد."
+
+        else:
+            category = "SOFTWARE_DEFECT"
+            severity = "MEDIUM"
+            root_cause = f"خطای اجرای سرویس ({exc_short}): {root_msg}"
+            recommendation = "بررسی لاگ‌های هم‌زمان و فراخوانی مجدد در صورت خطای گذرا."
+
+        return {
+            "window_id": window["window_id"],
+            "start_line": window["start_line"],
+            "end_line": window["end_line"],
+            "is_anomaly": True,
+            "confidence": confidence,
+            "category": category,
+            "category_fa": cls.CATEGORY_LABELS.get(category, category),
+            "severity": severity,
+            "exception_type": exc_short,
+            "exception_full": root_exc,
+            "root_cause": root_cause,
+            "recommended_action": recommendation,
+            "timestamp": timestamp,
+            "thread": thread,
+            "snippet": "\n".join(lines[:6])
+        }
+

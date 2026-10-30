@@ -23,59 +23,58 @@ class LayaLogClassifier:
         print(f"Initializing Laya Router (model: {self.model_name}, device: {self.device})...")
         self.router = Router(default=self.model_name, device=self.device)
 
-        # Calibrated domain question for BlueGene/L alert tagging
+        # Calibrated domain question for Spring Boot & Enterprise Application Logs
         self.questions = {
             "log_status": {
                 "type": "choice",
                 "instructions": (
-                    "You are classifying IBM BlueGene/L supercomputer logs into System Alerts (Error) vs Non-Alerts (Normal). "
-                    "CRITICAL BLUEGENE/L DOMAIN RULES: "
-                    "1. SYSTEM ALERTS (Error): Active critical hardware/network faults, specifically: "
-                    "   - data TLB error interrupt "
-                    "   - data storage interrupt "
-                    "   - ciod socket stream failures (failed to read message prefix, failed to fork child) "
-                    "   - application or ciod fatal panic/abort "
-                    "2. NON-ALERTS (Normal): User-space program events, info messages, and routine kernel operations: "
-                    "   - All INFO severity messages (generating core, double-hummer alignment exceptions, CE sym) "
-                    "   - Hardware register dumps and user program interrupts (trap instruction, imprecise exception, force load/store alignment) "
-                    "   - Any message with corrected"
+                    "You are an AIOps Anomaly Detector evaluating Spring Boot enterprise application log windows. "
+                    "Determine if this window contains an active ANOMALY/FAILURE (Error) or NORMAL operations (Normal). "
+                    "CRITICAL SPRING BOOT RULES: "
+                    "1. ANOMALY / ERROR: "
+                    "   - Java Exceptions and stack trace lines (e.g., 'at org...', 'Caused by:', SQLException, JpaSystemException, GenericJDBCException, NullPointerException, TimeoutException, RollbackException) "
+                    "   - Database connection acquisition failures, JDBC/Hikari pool exhaustion, transaction rollbacks "
+                    "   - Log level ERROR or FATAL, or critical WARN "
+                    "   - HTTP 500, 503 Service Unavailable, or failed scheduled batch job executions "
+                    "2. NORMAL: "
+                    "   - Routine INFO and DEBUG logs without exceptions "
+                    "   - Regular job/thread executions without stack traces "
+                    "   - Normal database queries, health checks, and transaction commits "
                 ),
                 "criteria": {
-                    "Normal": "INFO messages, generating core, alignment exceptions, corrected events, trap instructions, register dumps",
-                    "Error": "FATAL data TLB error interrupt, FATAL data storage interrupt, ciod socket failures, child process errors"
+                    "Normal": "routine INFO/DEBUG logs, no stack traces, no exceptions, normal execution",
+                    "Error": "Java exceptions, stack trace lines, JDBC connection failures, rollback exceptions, ERROR/FATAL events"
                 }
             }
         }
 
     def _fast_domain_check(self, text: str) -> Dict[str, Any] | None:
         """
-        Tier-1 deterministic classification for known BlueGene/L operational signatures.
+        Tier-1 deterministic classification for Spring Boot operational signatures.
         Returns prediction dict if matched, or None if escalated to Laya LLM.
         """
-        # Obvious normal: routine INFO severity or hardware-corrected events
-        if " corrected" in text or " INFO " in text:
-            return {
-                "predicted_label": "Normal",
-                "confidence": 0.99,
-                "probabilities": {"Normal": 0.99, "Error": 0.01},
-                "routing_source": "domain_rule"
-            }
-
-        # Obvious normal: user-space MPI crash register and state dumps (tagged as '-' in BGL)
-        if re.search(r'(instruction address:|data address:|exception syndrome register:|special purpose register:|machine state register:|force load/store alignment|machine check:|program interrupt:|core configuration register:|store operation|problem state|disable store gathering|data address space|\.\.\.\.\.\.\.\.[0-9]|lr:[0-9a-f]{8}|No such file or directory|rts internal error)', text):
-            return {
-                "predicted_label": "Normal",
-                "confidence": 0.99,
-                "probabilities": {"Normal": 0.99, "Error": 0.01},
-                "routing_source": "domain_rule"
-            }
-
-        # Obvious error: critical system hardware/network interrupts
-        if re.search(r'(data TLB error interrupt|data storage interrupt|failed to read message prefix|failed to fork child|ciod: Error creating node map)', text):
+        # 1. Obvious Error / Anomaly: stack traces, ERROR/FATAL levels, thrown exceptions, or connection failures
+        has_error = (
+            bool(re.search(r'(?:^\s*at\s+[a-zA-Z0-9_.]+\(|Caused by:\s+)', text, re.M)) or
+            bool(re.search(r'\b(ERROR|FATAL)\b', text)) or
+            bool(re.search(r'\b[a-zA-Z0-9_.]+(?:Exception|Error):\s+', text)) or
+            bool(re.search(r'(Unable to acquire JDBC Connection|Connection refused|SocketTimeoutException|rollback)', text, re.I))
+        )
+        if has_error:
             return {
                 "predicted_label": "Error",
                 "confidence": 0.99,
                 "probabilities": {"Normal": 0.01, "Error": 0.99},
+                "routing_source": "domain_rule"
+            }
+
+        # 2. Obvious Normal: routine INFO, DEBUG, or TRACE logs without any error markers
+        has_normal_level = bool(re.search(r'\b(INFO|DEBUG|TRACE)\b', text))
+        if has_normal_level:
+            return {
+                "predicted_label": "Normal",
+                "confidence": 0.99,
+                "probabilities": {"Normal": 0.99, "Error": 0.01},
                 "routing_source": "domain_rule"
             }
 
@@ -85,8 +84,18 @@ class LayaLogClassifier:
         """
         Classifies a window using domain-specific Laya evaluation.
         """
+        text = window.get("combined_text", "")
+        fast_res = self._fast_domain_check(text)
+        if fast_res is not None:
+            return {
+                "predicted_label": fast_res["predicted_label"],
+                "confidence": fast_res["confidence"],
+                "probabilities": fast_res["probabilities"],
+                "routing_model": "tier1_domain_rule"
+            }
+
         result = self.router.predict(
-            window["combined_text"],
+            text,
             self.questions,
             model=self.model_name,
             max_len=max_len
@@ -104,34 +113,37 @@ class LayaLogClassifier:
             "routing_model": result.get("routing", {}).get("model", self.model_name)
         }
 
-    def classify_lines_batch(self, logs: List[Dict[str, Any]], batch_size: int = 32) -> Dict[int, Dict[str, Any]]:
+    def classify_windows_batch(self, windows: List[Dict[str, Any]], batch_size: int = 16) -> List[Dict[str, Any]]:
         """
-        Performs fast, high-accuracy batch scoring over constituent lines
-        using a two-tier architecture: deterministic domain rules + Laya LLM.
+        Batch-evaluates overlapping sliding windows through Laya.
         """
-        predictions = {}
-        escalate_to_laya = []
+        results = [None] * len(windows)
+        escalate_indices = []
 
-        for item in logs:
-            lno = item["line_no"]
-            fast_res = self._fast_domain_check(item["log_text"])
+        for idx, win in enumerate(windows):
+            fast_res = self._fast_domain_check(win["combined_text"])
             if fast_res is not None:
-                predictions[lno] = fast_res
+                results[idx] = {
+                    "predicted_label": fast_res["predicted_label"],
+                    "confidence": fast_res["confidence"],
+                    "probabilities": fast_res["probabilities"],
+                    "routing_model": "tier1_fast_check"
+                }
             else:
-                escalate_to_laya.append(item)
+                escalate_indices.append(idx)
 
-        if escalate_to_laya:
-            print(f"Tier-1 classified {len(predictions)} lines. Escalating {len(escalate_to_laya)} lines to Laya LLM...")
-            requests = [{"state": item["log_text"], "questions": self.questions} for item in escalate_to_laya]
-            results = self.router.predict_batch(requests, batch_size=batch_size)
-            for item, res in zip(escalate_to_laya, results):
+        if escalate_indices:
+            print(f"Tier-1 classified {len(windows) - len(escalate_indices)} windows. Escalating {len(escalate_indices)} windows to Laya LLM...")
+            requests = [{"state": windows[i]["combined_text"], "questions": self.questions} for i in escalate_indices]
+            laya_res = self.router.predict_batch(requests, batch_size=batch_size)
+            for i, res in zip(escalate_indices, laya_res):
                 answer = res["answers"]["log_status"]
-                predictions[item["line_no"]] = {
+                results[i] = {
                     "predicted_label": answer["choice"],
                     "confidence": answer.get("confidence", 0.0),
                     "probabilities": answer.get("probabilities", {}),
-                    "routing_source": "laya_llm"
+                    "routing_model": "laya_llm"
                 }
 
-        return predictions
+        return results
 
