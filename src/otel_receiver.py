@@ -74,8 +74,7 @@ def send_grafana_annotation(incident: Dict[str, Any]):
     Sends an incident event as a native annotation to Grafana API.
     """
     annotation_urls = [
-        f"{GRAFANA_URL}/api/annotations",
-        "http://localhost:8080/grafana/api/annotations",
+        "http://localhost:8080/api/annotations",
         "http://localhost:3000/api/annotations"
     ]
     
