@@ -57,8 +57,8 @@ class LayaLogClassifier:
         has_error = (
             bool(re.search(r'(?:^\s*at\s+[a-zA-Z0-9_.]+\(|Caused by:\s+)', text, re.M)) or
             bool(re.search(r'\b(ERROR|FATAL)\b', text)) or
-            bool(re.search(r'\b[a-zA-Z0-9_.]+(?:Exception|Error):\s+', text)) or
-            bool(re.search(r'(Unable to acquire JDBC Connection|Connection refused|SocketTimeoutException|rollback)', text, re.I))
+            bool(re.search(r'\b[a-zA-Z0-9_.]+(?:Exception|Error)(?::|\b)', text)) or
+            bool(re.search(r'(Unable to acquire JDBC Connection|Connection refused|SocketTimeoutException|rollback|StatusRuntimeException|Status\{code=UNAVAILABLE|Failed with status)', text, re.I))
         )
         if has_error:
             return {
@@ -68,8 +68,8 @@ class LayaLogClassifier:
                 "routing_source": "domain_rule"
             }
 
-        # 2. Obvious Normal: routine INFO, DEBUG, or TRACE logs without any error markers
-        has_normal_level = bool(re.search(r'\b(INFO|DEBUG|TRACE)\b', text))
+        # 2. Obvious Normal: routine INFO, INFORMATION, DEBUG, or TRACE logs without any error markers
+        has_normal_level = bool(re.search(r'\b(INFO|INFORMATION|DEBUG|TRACE)\b', text, re.I))
         if has_normal_level:
             return {
                 "predicted_label": "Normal",

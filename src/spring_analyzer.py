@@ -215,13 +215,19 @@ class SpringIncidentClassifier:
                         root_msg = c[1].strip()
                         break
         else:
-            # Fallback check for JDBC / Rollback in raw text
+            # Fallback check for JDBC / Rollback / gRPC / Payment in raw text
             if "JDBC Connection" in text:
                 root_exc = "GenericJDBCException"
                 root_msg = "Unable to acquire JDBC Connection"
             elif "rollback" in text.lower():
                 root_exc = "RollbackException"
                 root_msg = "Transaction rollback detected"
+            elif "UNAVAILABLE" in text or "StatusRuntimeException" in text or "code=UNAVAILABLE" in text:
+                root_exc = "StatusRuntimeException"
+                root_msg = "gRPC service unavailable (Status.UNAVAILABLE)"
+            elif "Payment request failed" in text or "Invalid token" in text:
+                root_exc = "PaymentProcessingException"
+                root_msg = "Payment charge rejected / Invalid token"
             else:
                 root_exc = "ApplicationError"
                 root_msg = lines[0] if lines else "Error detected in window"
@@ -229,17 +235,17 @@ class SpringIncidentClassifier:
         exc_short = root_exc.split(".")[-1]
 
         # Categorize
-        if re.search(r'(JDBC|Connection|SQLException|MongoSocket|MongoTimeout|DataAccessResourceFailure|CannotAcquireLock|TimeoutException|ResourceException|PersistenceException|JpaSystemException)', root_exc):
+        if re.search(r'(JDBC|Connection|SQLException|MongoSocket|MongoTimeout|DataAccessResourceFailure|CannotAcquireLock|TimeoutException|ResourceException|PersistenceException|JpaSystemException|StatusRuntimeException|UNAVAILABLE)', root_exc):
             category = "INFRASTRUCTURE_OUTAGE"
             severity = "CRITICAL"
-            root_cause = f"بحران دیتابیس و ارتباط شبکه ({exc_short}): {root_msg or 'عدم امکان دریافت کانکشن یا قطعی ارتباط با پایگاه داده'}"
-            recommendation = "بررسی سلامت سرویس دیتابیس، ترافیک شبکه‌ای و بازبینی اندازه Connection Pool (HikariCP/DataSource)."
+            root_cause = f"بحران زیرساخت و ارتباط شبکه ({exc_short}): {root_msg or 'عدم دسترس‌پذیری سرویس یا پایگاه داده'}"
+            recommendation = "بررسی سلامت سرویس دیتابیس/gRPC، ترافیک شبکه‌ای و بازبینی لود سرور و وضعیت Circuit Breaker."
 
-        elif re.search(r'(RollbackException|TransactionSystemException|UnexpectedRollbackException|HeuristicHazard)', root_exc) or "rollback" in text.lower():
+        elif re.search(r'(RollbackException|TransactionSystemException|UnexpectedRollbackException|HeuristicHazard|PaymentProcessingException)', root_exc) or "rollback" in text.lower() or "payment" in text.lower():
             category = "TRANSACTION_FAILURE"
             severity = "HIGH"
-            root_cause = f"خطای شکست و رول‌بک ترانزکشن ({exc_short}): {root_msg or 'ترانزکشن مالی یا جاب پردازشی رول‌بک شد'}"
-            recommendation = "بررسی منطق تراکنش‌های متوالی، زمان timeout تراکنش و اطمینان از commit صحیح داده‌ها."
+            root_cause = f"خطای تراکنش و عملیات مالی ({exc_short}): {root_msg or 'ترانزکشن مالی یا جاب پردازشی با شکست مواجه شد'}"
+            recommendation = "بررسی درگاه پرداخت، اعتبار توکن تراکنش، زمان timeout تراکنش و اطمینان از صحت لاگ‌ها."
 
         elif re.search(r'(RuleException|ValidationException|ConstraintViolation|MethodArgumentNotValid)', root_exc):
             category = "BUSINESS_RULE_REJECTION"
