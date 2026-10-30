@@ -39,6 +39,7 @@ classifier: Optional[LayaLogClassifier] = None
 service_buffers: Dict[str, deque] = {}
 service_line_counters: Dict[str, int] = {}
 service_window_counters: Dict[str, int] = {}
+raw_logs_deque = deque(maxlen=400)
 total_logs_ingested = 0
 total_incidents_detected = 0
 state_lock = threading.Lock()
@@ -185,6 +186,12 @@ def ingest_log_line(service_name: str, timestamp_str: str, severity: str, body: 
 
         formatted_line = f"{timestamp_str} {severity.upper()} [{service_name}] - {body}"
         service_buffers[service_name].append(formatted_line)
+        raw_logs_deque.appendleft({
+            "timestamp": timestamp_str,
+            "service": service_name,
+            "severity": severity.upper(),
+            "message": body
+        })
 
         buf = service_buffers[service_name]
         is_error_line = severity.upper() in ("ERROR", "FATAL") or bool(re.search(r'(Exception|Error:|\bfail\b|\bfailed\b)', body, re.I))
@@ -239,6 +246,48 @@ def get_incidents(
         except Exception as e:
             return {"error": str(e), "data": []}
     return []
+
+@app.get("/api/logs")
+def get_raw_logs(
+    limit: int = Query(default=100, ge=1, le=400),
+    service: Optional[str] = None
+):
+    """
+    Returns recent raw streaming logs for the System Logs Grafana dashboard.
+    """
+    with state_lock:
+        logs = list(raw_logs_deque)
+    if service:
+        logs = [l for l in logs if l.get("service") == service]
+    return logs[:limit]
+
+@app.get("/api/stats")
+def get_stats():
+    """
+    Summary stats for Grafana Stat panels.
+    """
+    with state_lock:
+        return [
+            {"stat": "Total Logs Ingested", "value": total_logs_ingested},
+            {"stat": "AI Incidents Detected", "value": total_incidents_detected},
+            {"stat": "Monitored Microservices", "value": len(service_buffers) or 1}
+        ]
+
+@app.post("/api/reset")
+def reset_incidents():
+    """
+    Clears MongoDB incidents and in-memory incident counters for clean demo validations.
+    """
+    global total_incidents_detected
+    col = get_mongo_collection()
+    if col is not None:
+        try:
+            col.delete_many({})
+        except Exception as e:
+            print(f"[Mongo Error] {e}")
+    with state_lock:
+        total_incidents_detected = 0
+    return {"status": "ok", "message": "Demo data reset successfully"}
 
 @app.post("/v1/logs")
 async def receive_otlp_logs(request: Request, bg_tasks: BackgroundTasks):
@@ -325,6 +374,18 @@ def simulate_incident(service: str = "ad", bg_tasks: BackgroundTasks = None):
         f"2026-10-30 21:00:23 ERROR [{service}] - HTTP 500 Internal Server Error returned to downstream gateway.",
         f"2026-10-30 21:00:24 ERROR [{service}] - Transaction rollback completed for order_id=98271."
     ])
+
+    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    for line in simulated_lines:
+        sev = "ERROR" if "ERROR" in line else ("WARN" if "WARN" in line else "INFO")
+        msg = line.split(" - ", 1)[-1] if " - " in line else line
+        with state_lock:
+            raw_logs_deque.appendleft({
+                "timestamp": now_str,
+                "service": service,
+                "severity": sev,
+                "message": msg
+            })
 
     evaluate_window(service, simulated_lines, f"sim_{service}_{int(time.time())}", 1, 25)
     return {"status": "simulated", "service": service, "lines": len(simulated_lines)}
