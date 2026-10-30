@@ -42,6 +42,7 @@ service_window_counters: Dict[str, int] = {}
 raw_logs_deque = deque(maxlen=400)
 total_logs_ingested = 0
 total_incidents_detected = 0
+simulation_index = 0
 state_lock = threading.Lock()
 
 # MongoDB Client
@@ -354,37 +355,163 @@ async def receive_otlp_logs(request: Request, bg_tasks: BackgroundTasks):
     return {"status": "accepted", "processed_records": record_count}
 
 @app.post("/api/simulate-incident")
-def simulate_incident(service: str = "ad", bg_tasks: BackgroundTasks = None):
+def simulate_incident(
+    service: str = "ad",
+    type: Optional[str] = None,
+    bg_tasks: BackgroundTasks = None
+):
     """
-    Testing helper: simulates an outage window for a given service to verify end-to-end RCA & Grafana annotation.
+    Simulates rotating production outages across diverse categories:
+    - database_timeout (HikariCP connection pool timeout)
+    - null_pointer (Java NullPointerException in business logic)
+    - out_of_memory (JVM Heap Space exhaustion)
+    - grpc_unavailable (gRPC network outage)
+    - deadlock_timeout (Database deadlock & lock contention)
+    - validation_rule (Business validation rule rejection)
+    
+    If 'type' is omitted, rotates to the next fault automatically on every call!
     """
-    simulated_lines = [
-        f"2026-10-30 21:00:0{i:02d} INFO [{service}] - Processing routine request id={1000+i}" for i in range(15)
+    global simulation_index
+
+    scenarios = [
+        {
+            "id": "database_timeout",
+            "name": "اختلال استخر اتصالات دیتابیس (HikariCP / JPA Timeout)",
+            "exception": "SQLTransientConnectionException",
+            "service": service or "ad",
+            "lines": [
+                f"2026-10-30 21:00:13 ERROR [{service}] - Failed to obtain JDBC Connection: HikariPool-1 - Connection is not available, request timed out after 30000ms.",
+                f"2026-10-30 21:00:14 ERROR [{service}] - org.springframework.dao.DataAccessResourceFailureException: Unable to acquire JDBC Connection",
+                f"2026-10-30 21:00:15 ERROR [{service}] - \tat com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:213)",
+                f"2026-10-30 21:00:16 ERROR [{service}] - \tat org.hibernate.engine.jdbc.connections.internal.DatasourceConnectionProviderImpl.getConnection(DatasourceConnectionProviderImpl.java:122)",
+                f"2026-10-30 21:00:17 ERROR [{service}] - Caused by: java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms.",
+                f"2026-10-30 21:00:18 ERROR [{service}] - \tat com.zaxxer.hikari.util.ConcurrentBag.borrow(ConcurrentBag.java:149)",
+                f"2026-10-30 21:00:19 ERROR [{service}] - org.springframework.transaction.CannotCreateTransactionException: Could not open JPA EntityManager for transaction",
+                f"2026-10-30 21:00:20 WARN  [{service}] - Fallback cache route attempted, but circuit breaker is OPEN.",
+                f"2026-10-30 21:00:21 ERROR [{service}] - HTTP 500 Internal Server Error returned to downstream gateway.",
+                f"2026-10-30 21:00:22 ERROR [{service}] - Transaction rollback completed for order_id=98271."
+            ]
+        },
+        {
+            "id": "null_pointer",
+            "name": "باگ نرم‌افزاری و دسترسی نامعتبر (NullPointerException)",
+            "exception": "NullPointerException",
+            "service": service or "ad",
+            "lines": [
+                f"2026-10-30 21:00:13 ERROR [{service}] - Unexpected error occurred in AdCatalogService: Null pointer encountered",
+                f"2026-10-30 21:00:14 ERROR [{service}] - java.lang.NullPointerException: Cannot invoke \"com.opentelemetry.demo.AdItem.getCategory()\" because \"targetAd\" is null",
+                f"2026-10-30 21:00:15 ERROR [{service}] - \tat com.opentelemetry.demo.AdService.getAdsByCategory(AdService.java:84)",
+                f"2026-10-30 21:00:16 ERROR [{service}] - \tat com.opentelemetry.demo.AdService.processTargetedAds(AdService.java:128)",
+                f"2026-10-30 21:00:17 ERROR [{service}] - \tat com.opentelemetry.demo.AdServiceGrpc$MethodHandlers.invoke(AdServiceGrpc.java:214)",
+                f"2026-10-30 21:00:18 ERROR [{service}] - \tat io.grpc.stub.ServerCalls$UnaryServerCallHandler$UnaryServerCallListener.onHalfClose(ServerCalls.java:182)",
+                f"2026-10-30 21:00:19 ERROR [{service}] - HTTP 500 Internal Server Error: unhandled NullPointerException during dispatch",
+                f"2026-10-30 21:00:20 WARN  [{service}] - Client session 4091 aborted abnormally due to unhandled NullPointerException"
+            ]
+        },
+        {
+            "id": "out_of_memory",
+            "name": "سرریز حافظه و اتمام فضای هیپ (OutOfMemoryError: Java heap space)",
+            "exception": "OutOfMemoryError",
+            "service": service or "ad",
+            "lines": [
+                f"2026-10-30 21:00:13 WARN  [{service}] - JVM Garbage Collection took 4280ms (> 98% GC overhead limit exceeded)",
+                f"2026-10-30 21:00:14 ERROR [{service}] - java.lang.OutOfMemoryError: Java heap space",
+                f"2026-10-30 21:00:15 ERROR [{service}] - \tat java.base/java.util.Arrays.copyOf(Arrays.java:3537)",
+                f"2026-10-30 21:00:16 ERROR [{service}] - \tat java.base/java.io.ByteArrayOutputStream.grow(ByteArrayOutputStream.java:115)",
+                f"2026-10-30 21:00:17 ERROR [{service}] - \tat com.opentelemetry.demo.CacheManager.cacheProductVectors(CacheManager.java:214)",
+                f"2026-10-30 21:00:18 ERROR [{service}] - \tat com.opentelemetry.demo.AdService.buildAdResponse(AdService.java:190)",
+                f"2026-10-30 21:00:19 ERROR [{service}] - Fatal memory allocation failure: JVM heap 256MB exhausted",
+                f"2026-10-30 21:00:20 ERROR [{service}] - Application cannot satisfy memory request, worker thread killed"
+            ]
+        },
+        {
+            "id": "grpc_unavailable",
+            "name": "قطعی شبکه و عدم دسترسی به مایکروسرویس (StatusRuntimeException UNAVAILABLE)",
+            "exception": "StatusRuntimeException",
+            "service": service or "ad",
+            "lines": [
+                f"2026-10-30 21:00:13 ERROR [{service}] - gRPC Channel to payment-service failed connection handshake",
+                f"2026-10-30 21:00:14 ERROR [{service}] - io.grpc.StatusRuntimeException: UNAVAILABLE: io exception: Connection refused - downstream service is dead",
+                f"2026-10-30 21:00:15 ERROR [{service}] - \tat io.grpc.stub.ClientCalls.toStatusRuntimeException(ClientCalls.java:271)",
+                f"2026-10-30 21:00:16 ERROR [{service}] - \tat io.grpc.stub.ClientCalls.getUnchecked(ClientCalls.java:252)",
+                f"2026-10-30 21:00:17 ERROR [{service}] - \tat io.grpc.stub.ClientCalls.blockingUnaryCall(ClientCalls.java:165)",
+                f"2026-10-30 21:00:18 ERROR [{service}] - \tat com.opentelemetry.demo.PaymentClient.charge(PaymentClient.java:54)",
+                f"2026-10-30 21:00:19 WARN  [{service}] - Retried 3 times with exponential backoff: payment-service unreachable",
+                f"2026-10-30 21:00:20 ERROR [{service}] - Circuit Breaker state transitioned to OPEN: 100% downstream failures"
+            ]
+        },
+        {
+            "id": "deadlock_timeout",
+            "name": "بن‌بست تراکنش‌های همزمان دیتابیس (CannotAcquireLockException)",
+            "exception": "CannotAcquireLockException",
+            "service": service or "ad",
+            "lines": [
+                f"2026-10-30 21:00:13 ERROR [{service}] - Deadlock detected when trying to get lock; try restarting transaction",
+                f"2026-10-30 21:00:14 ERROR [{service}] - org.springframework.dao.CannotAcquireLockException: could not execute statement [Lock wait timeout exceeded]; SQL [UPDATE inventory SET stock = stock - 1 WHERE id = 42 FOR UPDATE]",
+                f"2026-10-30 21:00:15 ERROR [{service}] - \tat org.hibernate.exception.internal.SQLExceptionTypeDelegate.convert(SQLExceptionTypeDelegate.java:66)",
+                f"2026-10-30 21:00:16 ERROR [{service}] - \tat org.hibernate.engine.jdbc.spi.SqlExceptionHelper.convert(SqlExceptionHelper.java:108)",
+                f"2026-10-30 21:00:17 ERROR [{service}] - Caused by: java.sql.SQLException: Deadlock found when trying to get lock; try restarting transaction",
+                f"2026-10-30 21:00:18 ERROR [{service}] - \tat com.mysql.cj.jdbc.exceptions.SQLError.createSQLException(SQLError.java:129)",
+                f"2026-10-30 21:00:19 ERROR [{service}] - Transaction rollback initiated for concurrent update thread pool-worker-18",
+                f"2026-10-30 21:00:20 WARN  [{service}] - High database contention detected on row lock id=42"
+            ]
+        },
+        {
+            "id": "validation_rule",
+            "name": "رد درخواست بر اساس قوانین تجاری و اعتبارسنجی (MethodArgumentNotValidException)",
+            "exception": "MethodArgumentNotValidException",
+            "service": service or "ad",
+            "lines": [
+                f"2026-10-30 21:00:13 ERROR [{service}] - Insurance policy rule engine rejected claim due to invalid coverage conditions",
+                f"2026-10-30 21:00:14 ERROR [{service}] - org.springframework.web.bind.MethodArgumentNotValidException: Validation failed for claim [PolicyClaimPayload: deductible=0, max_coverage=1000000000]",
+                f"2026-10-30 21:00:15 ERROR [{service}] - \tat org.springframework.web.method.annotation.ModelAttributeMethodProcessor.resolveArgument(ModelAttributeMethodProcessor.java:165)",
+                f"2026-10-30 21:00:16 ERROR [{service}] - Caused by: javax.validation.ConstraintViolationException: Policy maximum coverage exceeds insured threshold limit",
+                f"2026-10-30 21:00:17 ERROR [{service}] - \tat com.insurance.engine.rules.PolicyRuleValidator.validate(PolicyRuleValidator.java:73)",
+                f"2026-10-30 21:00:18 ERROR [{service}] - HTTP 422 Unprocessable Entity returned to client: business rule violation",
+                f"2026-10-30 21:00:19 WARN  [{service}] - Fraud detection flag triggered for claim ref=7013"
+            ]
+        }
     ]
-    simulated_lines.extend([
-        f"2026-10-30 21:00:16 ERROR [{service}] - Failed to obtain JDBC Connection: HikariPool-1 - Connection is not available, request timed out after 30000ms.",
-        f"2026-10-30 21:00:17 ERROR [{service}] - org.springframework.dao.DataAccessResourceFailureException: Unable to acquire JDBC Connection",
-        f"2026-10-30 21:00:17 ERROR [{service}] - \tat com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:213)",
-        f"2026-10-30 21:00:18 ERROR [{service}] - \tat org.hibernate.engine.jdbc.connections.internal.DatasourceConnectionProviderImpl.getConnection(DatasourceConnectionProviderImpl.java:122)",
-        f"2026-10-30 21:00:19 ERROR [{service}] - Caused by: java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms.",
-        f"2026-10-30 21:00:20 ERROR [{service}] - \tat com.zaxxer.hikari.util.ConcurrentBag.borrow(ConcurrentBag.java:149)",
-        f"2026-10-30 21:00:21 ERROR [{service}] - org.springframework.transaction.CannotCreateTransactionException: Could not open JPA EntityManager for transaction",
-        f"2026-10-30 21:00:22 WARN  [{service}] - Fallback cache route attempted, but circuit breaker is OPEN.",
-        f"2026-10-30 21:00:23 ERROR [{service}] - HTTP 500 Internal Server Error returned to downstream gateway.",
-        f"2026-10-30 21:00:24 ERROR [{service}] - Transaction rollback completed for order_id=98271."
-    ])
+
+    selected = None
+    if type:
+        for s in scenarios:
+            if s["id"] == type or type in s["id"] or type.lower() in s["exception"].lower():
+                selected = s
+                break
+
+    if selected is None:
+        with state_lock:
+            simulation_index += 1
+            idx = (simulation_index - 1) % len(scenarios)
+            selected = scenarios[idx]
+
+    target_svc = selected["service"]
+    prefix_lines = [
+        f"2026-10-30 21:00:0{i:02d} INFO [{target_svc}] - Routine background processing item={100+i}"
+        for i in range(14)
+    ]
+    simulated_window = prefix_lines + selected["lines"]
 
     now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    for line in simulated_lines:
+    for line in simulated_window:
         sev = "ERROR" if "ERROR" in line else ("WARN" if "WARN" in line else "INFO")
         msg = line.split(" - ", 1)[-1] if " - " in line else line
         with state_lock:
             raw_logs_deque.appendleft({
                 "timestamp": now_str,
-                "service": service,
+                "service": target_svc,
                 "severity": sev,
                 "message": msg
             })
 
-    evaluate_window(service, simulated_lines, f"sim_{service}_{int(time.time())}", 1, 25)
-    return {"status": "simulated", "service": service, "lines": len(simulated_lines)}
+    evaluate_window(target_svc, simulated_window, f"sim_{selected['id']}_{int(time.time())}", 1, len(simulated_window))
+
+    return {
+        "status": "simulated",
+        "scenario_id": selected["id"],
+        "name_fa": selected["name"],
+        "exception": selected["exception"],
+        "service": target_svc,
+        "next_scenario_on_next_run": scenarios[simulation_index % len(scenarios)]["id"]
+    }
