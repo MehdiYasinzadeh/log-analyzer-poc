@@ -202,7 +202,7 @@ class SpringIncidentClassifier:
         thread = thread_match.group(1) if thread_match else "main"
 
         # Extract thrown exceptions
-        exc_pattern = re.compile(r'(?:Caused by:\s*|^|\n\s*)([a-zA-Z0-9_.]+(?:Exception|Error))(?::\s*([^\n\r\t]+))?')
+        exc_pattern = re.compile(r'(?:Caused by:\s*|^|\n\s*|\s*-\s*)([a-zA-Z0-9_.]+(?:Exception|Error))(?::\s*([^\n\r\t]+))?')
         matches = exc_pattern.findall(text)
         valid_causes = [m for m in matches if not m[0].endswith(('Runnable', 'Logger', 'Handler', 'Helper', 'Template', 'Factory'))]
 
@@ -240,6 +240,12 @@ class SpringIncidentClassifier:
             severity = "CRITICAL"
             root_cause = f"بحران زیرساخت و ارتباط شبکه ({exc_short}): {root_msg or 'عدم دسترس‌پذیری سرویس یا پایگاه داده'}"
             recommendation = "بررسی سلامت سرویس دیتابیس/gRPC، ترافیک شبکه‌ای و بازبینی لود سرور و وضعیت Circuit Breaker."
+
+        elif "OutOfMemoryError" in root_exc or "heap space" in text.lower():
+            category = "INFRASTRUCTURE_OUTAGE"
+            severity = "CRITICAL"
+            root_cause = f"بحران منابع سرور و سرریز حافظه ({exc_short}): تکمیل ظرفیت JVM Heap Space و عدم امکان تخصیص آبجکت جدید"
+            recommendation = "بررسی نشت حافظه (Memory Leak)، آنالیز Heap Dump با Eclipse MAT و بازبینی پارامترهای -Xmx جاوا."
 
         elif re.search(r'(RollbackException|TransactionSystemException|UnexpectedRollbackException|HeuristicHazard|PaymentProcessingException)', root_exc) or "rollback" in text.lower() or "payment" in text.lower():
             category = "TRANSACTION_FAILURE"
